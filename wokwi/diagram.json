@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "author": "Roland Zacx",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-breadboard-half", "id": "bb1", "top": 64.2, "left": 89.2, "attrs": {} },
+    { "type": "wokwi-arduino-uno", "id": "uno", "top": -28.2, "left": -279, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -143.7, "left": 369, "attrs": {} },
+    {
+      "type": "wokwi-photoresistor-sensor",
+      "id": "ldr1",
+      "top": 252.8,
+      "left": 471.2,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    [ "uno:5V", "bb1:bp.3", "red", [ "v0" ] ],
+    [ "uno:GND.2", "bb1:bn.3", "black", [ "v0" ] ],
+    [ "dht1:VCC", "bb1:10t.a", "cyan", [ "v9.6", "h-182.4" ] ],
+    [ "bb1:10t.b", "bb1:bp.8", "green", [ "v0" ] ],
+    [ "dht1:GND", "bb1:11t.a", "yellow", [ "v48", "h-201.6", "v9.6" ] ],
+    [ "bb1:11t.b", "bb1:bn.9", "green", [ "v0" ] ],
+    [ "dht1:SDA", "uno:2", "magenta", [ "v28.8", "h-134.3", "v-76.8", "h-297.6" ] ],
+    [ "ldr1:VCC", "bb1:20t.a", "purple", [ "h0", "v-220.8", "h-345.6" ] ],
+    [ "bb1:20t.b", "bb1:bp.16", "green", [ "v0" ] ],
+    [ "ldr1:GND", "bb1:21t.a", "white", [ "h19.2", "v-221.2", "h-355.2" ] ],
+    [ "bb1:21t.b", "bb1:bn.17", "green", [ "v0" ] ],
+    [ "ldr1:AO", "uno:A0", "gray", [ "h0", "v37.7", "h-720" ] ]
+  ],
+  "dependencies": {}
+}
