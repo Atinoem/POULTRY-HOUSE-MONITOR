@@ -8,10 +8,10 @@ DHT dht(DHTPIN, DHTTYPE);
 const int ldrPin = A0;    // Photoresistor (LDR) connected to Analog Pin A0
 
 // Actuator Pin Definition
-const int fanPin = 3;     // MOSFET control pin connected to Digital Pin 3
+const int fanPin = 3;     // Single MOSFET module connected to Pin 3
 
-// Temperature Threshold for Fan Activation
-const float TEMP_THRESHOLD = 30.0; // Fan turns on when temp is above 30.0°C
+// Dynamic Temperature Threshold (managed by the Streamlit App)
+float tempHighLimit = 30.0; // Default: Fan turns on when temp is above 30.0°C
 
 void setup() {
   // Initialize Serial communication at 9600 baud rate
@@ -20,41 +20,55 @@ void setup() {
   // Initialize DHT sensor
   dht.begin();
   
-  // Configure the MOSFET control pin as an OUTPUT
+  // Configure the single MOSFET control pin as an OUTPUT
   pinMode(fanPin, OUTPUT);
   digitalWrite(fanPin, LOW); // Start with the fan OFF
 }
 
 void loop() {
-  // Read values from the DHT22
+  // 1. Read physical values
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
-  
-  // Read analog value from the Photoresistor (0 to 1023)
-  int lightLevel = analogRead(ldrPin);
+  int lightLevel = analogRead(ldrPin); // Reads 0 (dark) to 1023 (bright)
 
-  // Check if DHT22 read failed (isnan stands for "is Not a Number")
+  // Check if DHT22 read failed
   if (isnan(temperature) || isnan(humidity)) {
-    Serial.println("Failed to read from DHT22 sensor!");
-  } else {
-    // Print reading results to the Serial Monitor
-    Serial.print("Temp: ");
-    Serial.print(temperature);
-    Serial.print(" °C | Humidity: ");
-    Serial.print(humidity);
-    Serial.print(" % | Light: ");
-    Serial.print(lightLevel);
+    temperature = 0.0;
+    humidity = 0.0;
+  }
 
-    // --- Fan Control Logic ---
-    if (temperature > TEMP_THRESHOLD) {
-      digitalWrite(fanPin, HIGH); // Send 5V to the MOSFET SIG pin to turn fan ON
-      Serial.println(" | Fan Status: ON");
-    } else {
-      digitalWrite(fanPin, LOW);  // Send 0V to the MOSFET SIG pin to turn fan OFF
-      Serial.println(" | Fan Status: OFF");
+  // 2. Control Logic for your single MOSFET
+  int fanStatus = 0;
+  if (temperature > tempHighLimit) {
+    digitalWrite(fanPin, HIGH); // Turn fan ON
+    fanStatus = 1;
+  } else {
+    digitalWrite(fanPin, LOW);  // Turn fan OFF
+    fanStatus = 0;
+  }
+
+  // 3. Print cleanly formatted data for Python to parse
+  // Format: Temperature,Humidity,Light_Level,Fan_Status
+  Serial.print(temperature, 1);
+  Serial.print(",");
+  Serial.print(humidity, 1);
+  Serial.print(",");
+  Serial.print(lightLevel);
+  Serial.print(",");
+  Serial.println(fanStatus);
+
+  // 4. Check for incoming threshold changes from Python Dashboard
+  // Streamlit sends: "SET:high_limit\n"
+  if (Serial.available() > 0) {
+    String incoming = Serial.readStringUntil('\n');
+    incoming.trim();
+    
+    if (incoming.startsWith("SET:")) {
+      String valueStr = incoming.substring(4);
+      tempHighLimit = valueStr.toFloat();
     }
   }
 
-  // Wait 2 seconds before taking the next reading
+  // Wait 2 seconds before repeating
   delay(2000);
 }
