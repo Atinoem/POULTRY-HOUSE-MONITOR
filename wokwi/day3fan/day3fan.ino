@@ -10,8 +10,8 @@ const int ldrPin = A0;    // Photoresistor (LDR) connected to Analog Pin A0
 // Actuator Pin Definition
 const int fanPin = 3;     // Single MOSFET module connected to Pin 3
 
-// Dynamic Temperature Threshold (managed by the Streamlit App)
-float tempHighLimit = 30.0; // Default: Fan turns on when temp is above 30.0°C
+// Dynamic Temperature Threshold (dynamically updated by your Streamlit App selection)
+float tempHighLimit = 32.0; // Default: Week 2 threshold is 32.0°C
 
 void setup() {
   // Initialize Serial communication at 9600 baud rate
@@ -26,7 +26,23 @@ void setup() {
 }
 
 void loop() {
-  // 1. Read physical values
+  // 1. Check for incoming threshold updates from Python Dashboard FIRST
+  // Streamlit sends: "SET:high_limit\n"
+  if (Serial.available() > 0) {
+    String incoming = Serial.readStringUntil('\n');
+    incoming.trim();
+    
+    if (incoming.startsWith("SET:")) {
+      String valueStr = incoming.substring(4);
+      float newThreshold = valueStr.toFloat();
+      // Ensure we parsed a valid positive number before updating
+      if (newThreshold > 0.0) {
+        tempHighLimit = newThreshold;
+      }
+    }
+  }
+
+  // 2. Read physical values from the sensors
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
   int lightLevel = analogRead(ldrPin); // Reads 0 (dark) to 1023 (bright)
@@ -37,17 +53,17 @@ void loop() {
     humidity = 0.0;
   }
 
-  // 2. Control Logic for your single MOSFET
+  // 3. Control Logic for the single MOSFET module based on dynamic threshold
   int fanStatus = 0;
   if (temperature > tempHighLimit) {
-    digitalWrite(fanPin, HIGH); // Turn fan ON
+    digitalWrite(fanPin, HIGH); // Turn fan ON (Cooldown)
     fanStatus = 1;
   } else {
-    digitalWrite(fanPin, LOW);  // Turn fan OFF
+    digitalWrite(fanPin, LOW);  // Turn fan OFF (Comfortable temperature)
     fanStatus = 0;
   }
 
-  // 3. Print cleanly formatted data for Python to parse
+  // 4. Print cleanly formatted data for the Python Dashboard to parse
   // Format: Temperature,Humidity,Light_Level,Fan_Status
   Serial.print(temperature, 1);
   Serial.print(",");
@@ -57,18 +73,6 @@ void loop() {
   Serial.print(",");
   Serial.println(fanStatus);
 
-  // 4. Check for incoming threshold changes from Python Dashboard
-  // Streamlit sends: "SET:high_limit\n"
-  if (Serial.available() > 0) {
-    String incoming = Serial.readStringUntil('\n');
-    incoming.trim();
-    
-    if (incoming.startsWith("SET:")) {
-      String valueStr = incoming.substring(4);
-      tempHighLimit = valueStr.toFloat();
-    }
-  }
-
-  // Wait 2 seconds before repeating
+  // 2-second interval before repeating the loop
   delay(2000);
 }
