@@ -14,7 +14,7 @@ const int ldrPin = A0;    // Photoresistor (LDR) connected to Analog Pin A0
 
 // Actuator Pin Definitions
 const int fanPin = 3;     // Cooling Fan MOSFET connected to Pin 3
-const int lightPin = 10;  // Lighting Bulb MOSFET connected to Pin 10
+const int lightPin = 10;  // Heating Bulb MOSFET connected to Pin 10
 const int buzzerPin = 5;  // Active Piezo Buzzer connected to Pin 5
 
 // LED Indicator Pin Definitions
@@ -25,6 +25,9 @@ const int greenLedPin = 8;  // Optimal Temperature LED (Comfortable Zone)
 // Default Temperature Thresholds (Week 2 preset active by default: 29.0°C to 32.0°C)
 float tempLowLimit = 29.0;
 float tempHighLimit = 32.0;
+
+// Track state of the heating bulb hysteresis
+bool isBulbActive = false;
 
 // Track active mode: 1 = WEEK1, 2 = WEEK2, 3 = WEEK3, 4 = WEEK4, 0 = MANUAL
 int activeWeekMode = 2; 
@@ -100,56 +103,56 @@ void loop() {
     }
 
     int fanStatus = 0;
-    bool isYellowLedOn = false;
+    float tempMidPoint = (tempLowLimit + tempHighLimit) / 2.0;
 
-    // 3. Temperature & LED Logic
+    // 3. Heating Bulb Hysteresis Logic
+    if (temperature < tempLowLimit) {
+      isBulbActive = true; // Turn ON when below threshold
+    } else if (temperature >= tempMidPoint) {
+      isBulbActive = false; // Turn OFF once target average is reached
+    }
+
+    // 4. Actuator & LED Logic
     if (temperature > 0.0) {
       if (temperature > tempHighLimit) {
-        // 🔴 OVERHEATING -> Fan ON, Red LED ON
+        // 🔴 OVERHEATING -> Fan ON, Red LED ON, Green & Yellow OFF
         digitalWrite(fanPin, HIGH);
         fanStatus = 1;
 
         digitalWrite(redLedPin, HIGH);
         digitalWrite(yellowLedPin, LOW);
         digitalWrite(greenLedPin, LOW);
-        isYellowLedOn = false;
 
         triggerBuzzerChirp(150);
 
       } else if (temperature < tempLowLimit) {
-        // 🟡 TOO COLD -> Fan OFF, Yellow LED ON
+        // 🟡 TOO COLD -> Fan OFF, Yellow LED ON, Green & Red OFF
         digitalWrite(fanPin, LOW);
         fanStatus = 0;
 
         digitalWrite(redLedPin, LOW);
         digitalWrite(yellowLedPin, HIGH);
         digitalWrite(greenLedPin, LOW);
-        isYellowLedOn = true;
 
         triggerBuzzerDoubleChirp();
 
       } else {
-        // 🟢 OPTIMAL -> Fan OFF, Green LED ON
+        // 🟢 RANGE REACHED -> Fan OFF, Yellow & Red OFF, Green LED ON
         digitalWrite(fanPin, LOW);
         fanStatus = 0;
 
         digitalWrite(redLedPin, LOW);
         digitalWrite(yellowLedPin, LOW);
         digitalWrite(greenLedPin, HIGH);
-        isYellowLedOn = false;
 
         digitalWrite(buzzerPin, LOW);
       }
     }
 
-    // 4. Light Bulb Logic: Bulb turns ON ONLY when a week mode is active AND Yellow LED is ON
-    if (isYellowLedOn && (activeWeekMode >= 1 && activeWeekMode <= 4)) {
-      digitalWrite(lightPin, HIGH);
-    } else {
-      digitalWrite(lightPin, LOW);
-    }
+    // 5. Apply Heating Bulb Relay State
+    digitalWrite(lightPin, isBulbActive ? HIGH : LOW);
 
-    // 5. Display Readings on 16x2 LCD
+    // 6. Display Readings on 16x2 LCD
     // Line 1: Temperature & Humidity
     lcd.setCursor(0, 0);
     lcd.print("T:");
@@ -169,7 +172,7 @@ void loop() {
     lcd.print(" Fan:");
     lcd.print(fanStatus ? "ON " : "OFF");
 
-    // 6. Output Data Stream for Streamlit Dashboard (CSV: Temp,Humidity,Light,Fan)
+    // 7. Output Data Stream for Streamlit Dashboard (CSV: Temp,Humidity,Light,Fan)
     Serial.print(temperature, 1);
     Serial.print(",");
     Serial.print(humidity, 1);
@@ -200,7 +203,7 @@ void processCommand(String command) {
     float val = command.substring(8).toFloat();
     if (val > 0.0) {
       tempLowLimit = val;
-      activeWeekMode = 0; // Switching to manual mode disables automatic week bulb power
+      activeWeekMode = 0; // Switching to manual mode
     }
   } else if (command.startsWith("SET_HIGH:")) {
     float val = command.substring(9).toFloat();
