@@ -4,7 +4,7 @@ CoopGuard™️ - Smart Poultry House Monitoring System
 ===============================================================
 Reads live physical data from DHT22, LDR, MOSFET Fan, Bulb, and Buzzer.
 Includes week preset synchronization, manual target setpoint override,
-and time-filtered telemetry visualization.
+time-aggregated telemetry visualization, and CSV report export.
 
 Expected CSV format from Arduino:
     Temperature,Humidity,Light_Level,Fan_Status
@@ -30,7 +30,7 @@ import streamlit as st
 # ---------------------------------------------------------------
 # Config & Page Layout
 # ---------------------------------------------------------------
-MAX_POINTS = 500  # Capacity for historical/time-filtered view
+MAX_POINTS = 5000  # Increased capacity for historical aggregated telemetry
 REFRESH_SECONDS = 2
 
 # Target temperature ranges by chick age: (Low Limit, High Limit, Serial Command)
@@ -63,6 +63,7 @@ class SerialManager:
         self.target_low = 29.0   # Default Week 2 Low
         self.target_high = 32.0  # Default Week 2 High
         self.current_week_cmd = "WEEK2"
+        self.bulb_active = False # Hysteresis state for heating bulb
 
     # ---- Connection Control -------------------------------------------------
     def connect_serial(self, port, baud=9600):
@@ -205,19 +206,18 @@ st.sidebar.divider()
 st.sidebar.subheader("Chick Development Phase")
 selected_age = st.sidebar.selectbox("Select Chick Age Stage", list(AGE_THRESHOLDS.keys()), index=1)
 
-# Direct Target Override Toggle (Works across ALL weeks)
-use_target_override = st.sidebar.checkbox("🎯 Enable Direct Setpoint Override", value=False)
+# Direct Target Override Toggle
+use_target_override = st.sidebar.checkbox("Enable Direct Setpoint Override", value=False)
 
 if use_target_override:
-    st.sidebar.info("⚙️ **Override Active:** Enter desired target value. The system maintains it dynamically.")
+    st.sidebar.info("**Override Active:** Enter desired target value. The system maintains it dynamically.")
     desired_temp = st.sidebar.number_input("Target Temperature (°C)", value=28.0, step=0.5, format="%.1f")
     
-    # Define maintaining hysteresis band around target setpoint (±0.5°C)
     target_low = desired_temp - 0.5
     target_high = desired_temp + 0.5
     week_cmd = None
 elif selected_age == "Week 5+":
-    st.sidebar.info("⚙️ **Manual Mode:** Customize low & high thermal limits.")
+    st.sidebar.info("**Manual Mode:** Customize low & high thermal limits.")
     col_low, col_high = st.sidebar.columns(2)
     target_low = col_low.number_input("Low Temp (°C)", value=20.0, step=0.5, format="%.1f")
     target_high = col_high.number_input("High Temp (°C)", value=23.0, step=0.5, format="%.1f")
@@ -225,8 +225,11 @@ elif selected_age == "Week 5+":
 else:
     target_low, target_high, week_cmd = AGE_THRESHOLDS[selected_age]
 
-st.sidebar.caption(f"Target Thermal Zone: **{target_low:.1f}°C – {target_high:.1f}°C**")
-st.sidebar.caption(f"🔴 High Threshold: **>{target_high:.1f}°C** | 🟡 Low Threshold: **<{target_low:.1f}°C**")
+# Calculate target average (midpoint)
+target_mid = (target_low + target_high) / 2.0
+
+st.sidebar.caption(f"Target Thermal Zone: **{target_low:.1f}°C – {target_high:.1f}°C** (Avg Target: **{target_mid:.1f}°C**)")
+st.sidebar.caption(f"🔴 High Threshold: **>{target_high:.1f}°C** | 🟢 Optimal Zone: **{target_low:.1f}–{target_high:.1f}°C** | 🟡 Low Threshold: **<{target_low:.1f}°C**")
 
 # Push presets or manual thresholds down serial if changed
 if manager.target_high != target_high or manager.target_low != target_low or manager.current_week_cmd != week_cmd:
@@ -245,7 +248,7 @@ available_ports = [p.device for p in ports_found]
 port_options = available_ports + ["Custom / manual entry..."]
 
 if not available_ports:
-    st.sidebar.caption("⚠️ No active COM ports detected. Connect Arduino USB cable.")
+    st.sidebar.caption("No active COM ports detected. Connect Arduino USB cable.")
 
 default_index = 0
 if detected_port in available_ports:
@@ -259,7 +262,7 @@ baud_rate = st.sidebar.selectbox("Baud Rate", [9600, 19200, 38400, 57600, 115200
 
 col_a, col_b = st.sidebar.columns(2)
 connect_clicked = col_a.button("🔌 Connect", use_container_width=True)
-disconnect_clicked = col_b.button("⏹ Disconnect", use_container_width=True)
+disconnect_clicked = col_b.button("Disconnect", use_container_width=True)
 
 if connect_clicked:
     ok = manager.connect_serial(port_choice, baud_rate)
@@ -275,20 +278,20 @@ if disconnect_clicked:
     st.rerun()
 
 if manager.connected_port:
-    st.sidebar.success(f"🟢 Active on {manager.connected_port} @ {baud_rate} baud")
+    st.sidebar.success(f"Active on {manager.connected_port} @ {baud_rate} baud")
 else:
-    st.sidebar.caption("🔴 Disconnected")
+    st.sidebar.caption("Disconnected")
 
 # ---------------------------------------------------------------
 # Main Dashboard Header
 # ---------------------------------------------------------------
 st.markdown("<h1 style='font-size: 2.2rem; font-weight: 700;'>CoopGuard<span style='color:#2E6B20;'>™</span> Live Operations</h1>", unsafe_allow_html=True)
-st.caption(f"Active Stage: **{selected_age}** {'(Target Override)' if use_target_override else ''} | Target Zone: **{target_low:.1f}°C to {target_high:.1f}°C**")
+st.caption(f"Active Stage: **{selected_age}** {'(Target Override)' if use_target_override else ''} | Target Range: **{target_low:.1f}°C to {target_high:.1f}°C** | Mid Target: **{target_mid:.1f}°C**")
 
 
 def card_html(label, value_str, status):
     colors = {
-        "ok":      ("#1a331c", "#2E6B20"), # CoopGuard Forest Green
+        "ok":      ("#1a331c", "#2E6B20"), # CoopGuard Forest Green / Green LED
         "warn":    ("#3d1e1e", "#FF4B4B"), # Red Alert
         "low":     ("#3d331e", "#FFC107"), # Yellow Alert
         "neutral": ("#1e2530", "#4FA3E3"), # Neutral Blue
@@ -324,15 +327,22 @@ def live_dashboard():
     hum = latest["humidity"]
     light = latest["light_level"]
     fan_on = latest["fan_status"] == 1
-    bulb_on = temp < target_low
 
-    # Determine status color
+    # Heating Bulb & Green LED Range Hysteresis Logic
+    if temp < target_low:
+        manager.bulb_active = True
+    elif temp >= target_mid:
+        manager.bulb_active = False
+
+    bulb_on = manager.bulb_active
+    in_target_range = target_low <= temp <= target_high
+
     if temp > target_high:
         temp_status = "warn"
-    elif temp < target_low:
-        temp_status = "low"
+    elif in_target_range:
+        temp_status = "ok" # Green LED Indicator Active
     else:
-        temp_status = "ok"
+        temp_status = "low"
 
     c1.markdown(card_html("Temperature", f"{temp:.1f} °C", temp_status), unsafe_allow_html=True)
     c2.markdown(card_html("Humidity", f"{hum:.1f} %", "neutral"), unsafe_allow_html=True)
@@ -344,18 +354,18 @@ def live_dashboard():
     # Safety Check & Alarm Logic
     # ---------------------------------------------------------
     if temp > target_high:
-        st.error(f"🔥 **OVERHEATING ALERT:** Temperature ({temp:.1f}°C) exceeds target ({target_high:.1f}°C)! Cooling fan active.")
+        st.error(f"🔥 **OVERHEATING ALERT:** Temperature ({temp:.1f}°C) exceeds upper limit ({target_high:.1f}°C)! Cooling fan active.")
         siren_url = "https://archive.org/download/Red_Library_Sirens/R18-27-Classic%20Emergency%20Siren.mp3"
         st.components.v1.html(
             f"""
             <audio autoplay loop style="display:none;">
                 <source src="{siren_url}" type="audio/mp3">
             </audio>
-            """,
+            """, 
             height=0,
         )
     elif temp < target_low:
-        st.warning(f"❄️ **LOW TEMPERATURE ALERT:** Temperature ({temp:.1f}°C) is below target ({target_low:.1f}°C)! Heating lamp active.")
+        st.warning(f"❄️ **LOW TEMPERATURE ALERT:** Temperature ({temp:.1f}°C) is below lower limit ({target_low:.1f}°C)! Heating bulb active.")
         warning_beep_url = "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
         st.components.v1.html(
             f"""
@@ -369,60 +379,98 @@ def live_dashboard():
     st.divider()
 
     # ---------------------------------------------------------
-    # Telemetry Time Filter Controls
+    # Telemetry Resampling & Filter Engine
     # ---------------------------------------------------------
     filter_col1, filter_col2 = st.columns([1, 3])
     with filter_col1:
         time_filter = st.selectbox(
-            "📅 Telemetry Time Filter",
-            ["All Live Points", "Hourly (Last 1 Hour)", "Daily (Last 24 Hours)", "Weekly (Last 7 Days)", "Monthly (Last 30 Days)", "Yearly (Last 365 Days)"]
+            "Filter",
+            ["All Live Points", "Hourly (5-Min Averages)", "Daily (1-Hour Averages)", "Weekly (Daily Averages)", "Monthly (Weekly Averages)", "Yearly (Monthly Averages)"]
         )
 
-    # Filter dataframe based on timestamp
     now = datetime.now()
-    filtered_df = df.copy()
+    raw_df = df.copy()
 
-    if time_filter == "Hourly (Last 1 Hour)":
-        filtered_df = filtered_df[filtered_df["timestamp"] >= (now - timedelta(hours=1))]
-    elif time_filter == "Daily (Last 24 Hours)":
-        filtered_df = filtered_df[filtered_df["timestamp"] >= (now - timedelta(days=1))]
-    elif time_filter == "Weekly (Last 7 Days)":
-        filtered_df = filtered_df[filtered_df["timestamp"] >= (now - timedelta(days=7))]
-    elif time_filter == "Monthly (Last 30 Days)":
-        filtered_df = filtered_df[filtered_df["timestamp"] >= (now - timedelta(days=30))]
-    elif time_filter == "Yearly (Last 365 Days)":
-        filtered_df = filtered_df[filtered_df["timestamp"] >= (now - timedelta(days=365))]
+    # Determine window cutoff and resampling interval rule
+    resample_rule = None
+    if time_filter == "Hourly (5-Min Averages)":
+        cutoff = now - timedelta(hours=1)
+        resample_rule = "5min"
+    elif time_filter == "Daily (1-Hour Averages)":
+        cutoff = now - timedelta(days=1)
+        resample_rule = "1h"
+    elif time_filter == "Weekly (Daily Averages)":
+        cutoff = now - timedelta(days=7)
+        resample_rule = "1D"
+    elif time_filter == "Monthly (Weekly Averages)":
+        cutoff = now - timedelta(days=30)
+        resample_rule = "1W"
+    elif time_filter == "Yearly (Monthly Averages)":
+        cutoff = now - timedelta(days=365)
+        resample_rule = "1ME"
+    else:
+        cutoff = None
+
+    if cutoff is not None:
+        filtered_df = raw_df[raw_df["timestamp"] >= cutoff]
+    else:
+        filtered_df = raw_df
 
     if filtered_df.empty:
-        st.info("ℹ️ No historical data points found for the selected time filter range.")
+        st.info("No historical telemetry data found for the selected time window.")
         return
 
-    # ---- Graphics Trends ----
+    # Perform Averaging & Aggregation
+    if resample_rule:
+        resampled = (
+            filtered_df.set_index("timestamp")
+            .resample(resample_rule)
+            .agg({
+                "temperature": "mean",
+                "humidity": "mean",
+                "light_level": "mean",
+                "fan_status": "max" # Fan status is 1 if active at any point in interval
+            })
+            .dropna()
+            .reset_index()
+        )
+        display_df = resampled
+    else:
+        display_df = filtered_df
+
+    if display_df.empty:
+        st.info("Telemetry collection in progress... Waiting to compile interval averages.")
+        return
+
+    # ---- Graphic Trends (Averaged Intervals) ----
     left, right = st.columns(2)
 
     with left:
         st.subheader("Temperature Telemetry & Target Bounds")
-        t_min = filtered_df["timestamp"].min()
-        t_max = filtered_df["timestamp"].max()
+        t_min = display_df["timestamp"].min()
+        t_max = display_df["timestamp"].max()
 
-        min_y = min(filtered_df["temperature"].min(), target_low) - 2.0
-        max_y = max(filtered_df["temperature"].max(), target_high) + 2.0
+        min_y = min(display_df["temperature"].min(), target_low) - 2.0
+        max_y = max(display_df["temperature"].max(), target_high) + 2.0
         
         limit_df = pd.DataFrame({
-            "timestamp": [t_min, t_max, t_min, t_max],
-            "limit_val": [target_high, target_high, target_low, target_low],
-            "Limit Type": ["Upper Limit", "Upper Limit", "Lower Limit", "Lower Limit"]
+            "timestamp": [t_min, t_max, t_min, t_max, t_min, t_max],
+            "limit_val": [target_high, target_high, target_mid, target_mid, target_low, target_low],
+            "Limit Type": ["Upper Limit", "Upper Limit", "Target Average", "Target Average", "Lower Limit", "Lower Limit"]
         })
 
         limit_lines = alt.Chart(limit_df).mark_line(strokeDash=[6, 4], strokeWidth=2).encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("limit_val:Q", title="Temperature (°C)", scale=alt.Scale(domain=[min_y, max_y])),
-            color=alt.Color("Limit Type:N", scale=alt.Scale(domain=["Upper Limit", "Lower Limit"], range=["#FF4B4B", "#FFC107"]))
+            x=alt.X("timestamp:T", title="Time Interval"),
+            y=alt.Y("limit_val:Q", title="Avg Temperature (°C)", scale=alt.Scale(domain=[min_y, max_y])),
+            color=alt.Color("Limit Type:N", scale=alt.Scale(
+                domain=["Upper Limit", "Target Average", "Lower Limit"],
+                range=["#FF4B4B", "#2E6B20", "#FFC107"]
+            ))
         )
         
-        line = alt.Chart(filtered_df).mark_line(color="#2E6B20", strokeWidth=2.5, point=True).encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("temperature:Q", scale=alt.Scale(domain=[min_y, max_y])),
+        line = alt.Chart(display_df).mark_line(color="#2E6B20", strokeWidth=2.5, point=True).encode(
+            x=alt.X("timestamp:T", title="Time Interval"),
+            y=alt.Y("temperature:Q", title="Avg Temp (°C)", scale=alt.Scale(domain=[min_y, max_y])),
             tooltip=["timestamp:T", "temperature:Q"],
         )
 
@@ -430,19 +478,39 @@ def live_dashboard():
 
     with right:
         st.subheader("Humidity Trend")
-        hum_line = alt.Chart(filtered_df).mark_line(color="#4FA3E3", strokeWidth=2.5, point=True).encode(
-            x=alt.X("timestamp:T", title="Time"),
-            y=alt.Y("humidity:Q", title="Humidity (%)", scale=alt.Scale(zero=False)),
+        hum_line = alt.Chart(display_df).mark_line(color="#4FA3E3", strokeWidth=2.5, point=True).encode(
+            x=alt.X("timestamp:T", title="Time Interval"),
+            y=alt.Y("humidity:Q", title="Avg Humidity (%)", scale=alt.Scale(zero=False)),
             tooltip=["timestamp:T", "humidity:Q"],
         )
         st.altair_chart(hum_line.properties(height=320), use_container_width=True)
 
     st.divider()
-    st.subheader("Live Telemetry Log")
+
+    # ---------------------------------------------------------
+    # Aggregated Telemetry Summary & Report CSV Export
+    # ---------------------------------------------------------
+    st.subheader("Aggregated Telemetry Report")
+    
+    # Format telemetry dataframe for export
+    formatted_export_df = display_df.copy()
+    formatted_export_df["temperature"] = formatted_export_df["temperature"].round(2)
+    formatted_export_df["humidity"] = formatted_export_df["humidity"].round(2)
+    formatted_export_df["light_level"] = formatted_export_df["light_level"].round(0)
+
     st.dataframe(
-        filtered_df.sort_values("timestamp", ascending=False).reset_index(drop=True),
+        formatted_export_df.sort_values("timestamp", ascending=False).reset_index(drop=True),
         use_container_width=True,
         height=250,
+    )
+
+    # Download Button for Supervisor Report Export
+    csv_data = formatted_export_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download Aggregated Telemetry Report (CSV)",
+        data=csv_data,
+        file_name=f"CoopGuard_Telemetry_Report_{time_filter.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}",
+        mime="text/csv",
     )
 
 
