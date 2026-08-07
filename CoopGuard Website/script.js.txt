@@ -1,0 +1,1 @@
+console.log("CoopGuard website loaded successfully");
