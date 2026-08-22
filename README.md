@@ -57,6 +57,19 @@ Docs/
 README.md
 ```
 
+## Security Notes
+
+The dashboard can switch the heating bulb and cooling fan, so treat it as a control system, not a read-only display:
+
+- Set a dashboard password before starting Streamlit; without one the app runs unauthenticated and warns in the sidebar:
+  ```
+  export COOPGUARD_DASHBOARD_PASSWORD="choose-a-strong-password"
+  streamlit run Dashboard.py --server.address 127.0.0.1
+  ```
+  Alternatively put `dashboard_password = "..."` in `.streamlit/secrets.toml` (never commit that file).
+- Keep the dashboard bound to localhost or behind a VPN/reverse proxy with TLS; do not expose it directly to the internet.
+- Setpoints are clamped to 15–40 °C and validated both in the dashboard and in the Arduino firmware, so a bad or malicious command cannot drive the brooder to a lethal target.
+
 ## Future Improvements
 
 - Wi-Fi / MQTT cloud connectivity
