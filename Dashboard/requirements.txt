@@ -1,4 +1,1 @@
-streamlit
-pyserial
-altair
-pandas
+-r ../requirements.txt

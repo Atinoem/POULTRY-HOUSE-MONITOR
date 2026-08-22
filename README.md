@@ -51,10 +51,24 @@ Arduino/
 Dashboard/
     Streamlit application
 
+CoopGuard/
+    Branded Streamlit application (aggregated telemetry + CSV export)
+
+coopguard_core/
+    Shared serial reader, thresholds and Streamlit UI helpers used by
+    both dashboards
+
 Docs/
     Technical report
 
+requirements.txt
 README.md
+```
+
+Install dependencies once from the repository root:
+
+```
+pip install -r requirements.txt
 ```
 
 ## Future Improvements
