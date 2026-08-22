@@ -15,6 +15,8 @@ Run with:
 ===============================================================
 """
 
+import hmac
+import re
 import time
 import threading
 from collections import deque
@@ -42,6 +44,19 @@ AGE_THRESHOLDS = {
     "Week 5+": (20.0, 23.0, None),
 }
 
+# Setpoints outside this band are never sent to the hardware: a heating bulb
+# driven to an out-of-range target can kill the flock.
+SAFE_TEMP_MIN = 15.0
+SAFE_TEMP_MAX = 40.0
+MIN_TEMP_SPAN = 0.5
+
+# Only these literal strings may be written to the serial link as commands.
+ALLOWED_COMMANDS = {"WEEK1", "WEEK2", "WEEK3", "WEEK4"}
+
+# Windows COM port or a POSIX tty device; anything else is rejected so an
+# operator cannot make the app open an arbitrary file on the host.
+PORT_PATTERN = re.compile(r"^(COM[0-9]{1,3}|/dev/[A-Za-z0-9._-]{1,32})$")
+
 st.set_page_config(
     page_title="CoopGuard™️ | Smart Poultry Monitor",
     page_icon="🛡️",
@@ -67,6 +82,9 @@ class SerialManager:
 
     # ---- Connection Control -------------------------------------------------
     def connect_serial(self, port, baud=9600):
+        if not PORT_PATTERN.match(str(port).strip()):
+            self.last_error = f"Invalid serial port name: {port!r}"
+            return False
         self.stop()
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
@@ -102,26 +120,41 @@ class SerialManager:
 
     # ---- Commands & Thresholds (Thread-Safe) --------------------------------
     def send_command(self, cmd_str):
-        if self.ser is not None:
-            try:
-                cmd = f"{cmd_str}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if cmd_str not in ALLOWED_COMMANDS:
+            self.last_error = f"Refused unknown serial command: {cmd_str!r}"
+            return False
+        if self.ser is None:
+            return False
+        try:
+            cmd = f"{cmd_str}\n"
+            with self.lock:
+                if self.ser.is_open:
+                    self.ser.write(cmd.encode("utf-8"))
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
 
     def send_thresholds(self, low, high):
+        if not valid_setpoints(low, high):
+            self.last_error = (
+                f"Refused unsafe thresholds: {low}\u2013{high} \u00b0C outside "
+                f"{SAFE_TEMP_MIN}\u2013{SAFE_TEMP_MAX} \u00b0C"
+            )
+            return False
         self.target_low = low
         self.target_high = high
-        if self.ser is not None:
-            try:
-                cmd = f"SET_LOW:{low:.1f}\nSET_HIGH:{high:.1f}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if self.ser is None:
+            return False
+        try:
+            cmd = f"SET_LOW:{low:.1f}\nSET_HIGH:{high:.1f}\n"
+            with self.lock:
+                if self.ser.is_open:
+                    self.ser.write(cmd.encode("utf-8"))
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
 
     # ---- Read Loop ---------------------------------------------------------
     def _serial_read_loop(self):
@@ -163,6 +196,54 @@ class SerialManager:
             if not self.data:
                 return None
             return self.data[-1]
+
+
+def valid_setpoints(low, high):
+    return (
+        SAFE_TEMP_MIN <= low <= SAFE_TEMP_MAX
+        and SAFE_TEMP_MIN <= high <= SAFE_TEMP_MAX
+        and high - low >= MIN_TEMP_SPAN
+    )
+
+
+def configured_password():
+    env_password = os.environ.get("COOPGUARD_DASHBOARD_PASSWORD", "")
+    if env_password:
+        return env_password
+    try:
+        return st.secrets.get("dashboard_password", "")
+    except Exception:
+        return ""
+
+
+def require_authentication():
+    """Gate the dashboard behind a shared password when one is configured.
+
+    The dashboard can switch heating and cooling hardware on and off, so it must
+    not be reachable by anyone who can open its port.
+    """
+    expected = configured_password()
+    if not expected:
+        st.sidebar.warning(
+            "No dashboard password set. Export COOPGUARD_DASHBOARD_PASSWORD and "
+            "bind Streamlit to localhost before exposing this dashboard."
+        )
+        return
+    if st.session_state.get("coopguard_authenticated"):
+        return
+
+    st.title("CoopGuard\u2122 Sign In")
+    entered = st.text_input("Dashboard password", type="password")
+    if st.button("Sign in"):
+        if hmac.compare_digest(entered, expected):
+            st.session_state["coopguard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+require_authentication()
 
 
 @st.cache_resource
@@ -211,19 +292,47 @@ use_target_override = st.sidebar.checkbox("Enable Direct Setpoint Override", val
 
 if use_target_override:
     st.sidebar.info("**Override Active:** Enter desired target value. The system maintains it dynamically.")
-    desired_temp = st.sidebar.number_input("Target Temperature (°C)", value=28.0, step=0.5, format="%.1f")
-    
+    desired_temp = st.sidebar.number_input(
+        "Target Temperature (°C)",
+        min_value=SAFE_TEMP_MIN + 0.5,
+        max_value=SAFE_TEMP_MAX - 0.5,
+        value=28.0,
+        step=0.5,
+        format="%.1f",
+    )
+
     target_low = desired_temp - 0.5
     target_high = desired_temp + 0.5
     week_cmd = None
 elif selected_age == "Week 5+":
     st.sidebar.info("**Manual Mode:** Customize low & high thermal limits.")
     col_low, col_high = st.sidebar.columns(2)
-    target_low = col_low.number_input("Low Temp (°C)", value=20.0, step=0.5, format="%.1f")
-    target_high = col_high.number_input("High Temp (°C)", value=23.0, step=0.5, format="%.1f")
+    target_low = col_low.number_input(
+        "Low Temp (°C)",
+        min_value=SAFE_TEMP_MIN,
+        max_value=SAFE_TEMP_MAX,
+        value=20.0,
+        step=0.5,
+        format="%.1f",
+    )
+    target_high = col_high.number_input(
+        "High Temp (°C)",
+        min_value=SAFE_TEMP_MIN,
+        max_value=SAFE_TEMP_MAX,
+        value=23.0,
+        step=0.5,
+        format="%.1f",
+    )
     week_cmd = None
 else:
     target_low, target_high, week_cmd = AGE_THRESHOLDS[selected_age]
+
+if week_cmd is None and not valid_setpoints(target_low, target_high):
+    st.sidebar.error(
+        f"Unsafe target range: low must be at least {MIN_TEMP_SPAN:.1f}°C below high, "
+        f"and both within {SAFE_TEMP_MIN:.0f}–{SAFE_TEMP_MAX:.0f}°C."
+    )
+    st.stop()
 
 # Calculate target average (midpoint)
 target_mid = (target_low + target_high) / 2.0

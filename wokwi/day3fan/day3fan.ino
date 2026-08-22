@@ -13,6 +13,10 @@ const int fanPin = 3;     // Single MOSFET module connected to Pin 3
 // Dynamic Temperature Threshold (dynamically updated by your Streamlit App selection)
 float tempHighLimit = 32.0; // Default: Week 2 threshold is 32.0°C
 
+// Absolute safety envelope for operator-supplied setpoints (degrees C)
+const float SAFE_TEMP_MIN = 15.0;
+const float SAFE_TEMP_MAX = 40.0;
+
 void setup() {
   // Initialize Serial communication at 9600 baud rate
   Serial.begin(9600);
@@ -35,8 +39,8 @@ void loop() {
     if (incoming.startsWith("SET:")) {
       String valueStr = incoming.substring(4);
       float newThreshold = valueStr.toFloat();
-      // Ensure we parsed a valid positive number before updating
-      if (newThreshold > 0.0) {
+      // Only accept setpoints inside the brooder safety envelope
+      if (newThreshold >= SAFE_TEMP_MIN && newThreshold <= SAFE_TEMP_MAX) {
         tempHighLimit = newThreshold;
       }
     }

@@ -32,6 +32,11 @@ bool isBulbActive = false;
 // Track active mode: 1 = WEEK1, 2 = WEEK2, 3 = WEEK3, 4 = WEEK4, 0 = MANUAL
 int activeWeekMode = 2; 
 
+// Absolute safety envelope for operator-supplied setpoints (degrees C)
+const float SAFE_TEMP_MIN = 15.0;
+const float SAFE_TEMP_MAX = 40.0;
+const float MIN_TEMP_SPAN = 0.5;
+
 // Default Light Threshold
 int darkThreshold = 300; 
 
@@ -41,6 +46,7 @@ const unsigned long sensorInterval = 2000; // DHT22 reads best at 2-second inter
 
 // Serial Buffer Variables
 String inputBuffer = "";
+const unsigned int MAX_COMMAND_LENGTH = 32;
 
 void setup() {
   Serial.begin(9600);
@@ -82,7 +88,12 @@ void loop() {
       processCommand(inputBuffer);
       inputBuffer = "";
     } else if (inChar != '\r') {
-      inputBuffer += inChar;
+      if (inputBuffer.length() < MAX_COMMAND_LENGTH) {
+        inputBuffer += inChar;
+      } else {
+        // Oversized command: drop it instead of exhausting SRAM
+        inputBuffer = "";
+      }
     }
   }
 
@@ -201,20 +212,24 @@ void processCommand(String command) {
     activeWeekMode = 4;
   } else if (command.startsWith("SET_LOW:")) {
     float val = command.substring(8).toFloat();
-    if (val > 0.0) {
+    if (isSafeTemp(val) && tempHighLimit - val >= MIN_TEMP_SPAN) {
       tempLowLimit = val;
       activeWeekMode = 0; // Switching to manual mode
     }
   } else if (command.startsWith("SET_HIGH:")) {
     float val = command.substring(9).toFloat();
-    if (val > 0.0) {
+    if (isSafeTemp(val) && val - tempLowLimit >= MIN_TEMP_SPAN) {
       tempHighLimit = val;
       activeWeekMode = 0;
     }
   } else if (command.startsWith("SET_DARK:")) {
     int val = command.substring(9).toInt();
-    if (val > 0) darkThreshold = val;
+    if (val > 0 && val <= 1023) darkThreshold = val;
   }
+}
+
+bool isSafeTemp(float val) {
+  return val >= SAFE_TEMP_MIN && val <= SAFE_TEMP_MAX;
 }
 
 // Helpers for audible feedback

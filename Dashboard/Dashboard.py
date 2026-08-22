@@ -14,6 +14,9 @@ Run with:
 ===============================================================
 """
 
+import hmac
+import os
+import re
 import time
 import threading
 from collections import deque
@@ -40,6 +43,19 @@ AGE_THRESHOLDS = {
     "Week 5+": (20.0, 23.0, None),
 }
 
+# Setpoints outside this band are never sent to the hardware: a heating bulb
+# driven to an out-of-range target can kill the flock.
+SAFE_TEMP_MIN = 15.0
+SAFE_TEMP_MAX = 40.0
+MIN_TEMP_SPAN = 0.5
+
+# Only these literal strings may be written to the serial link as commands.
+ALLOWED_COMMANDS = {"WEEK1", "WEEK2", "WEEK3", "WEEK4"}
+
+# Windows COM port or a POSIX tty device; anything else is rejected so an
+# operator cannot make the app open an arbitrary file on the host.
+PORT_PATTERN = re.compile(r"^(COM[0-9]{1,3}|/dev/[A-Za-z0-9._-]{1,32})$")
+
 st.set_page_config(
     page_title="Poultry House Monitor",
     page_icon="🐔",
@@ -64,6 +80,9 @@ class SerialManager:
 
     # ---- connection control -------------------------------------------------
     def connect_serial(self, port, baud=9600):
+        if not PORT_PATTERN.match(str(port).strip()):
+            self.last_error = f"Invalid serial port name: {port!r}"
+            return False
         self.stop()
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
@@ -99,26 +118,41 @@ class SerialManager:
 
     # ---- commands & thresholds (Thread-Safe) --------------------------------
     def send_command(self, cmd_str):
-        if self.ser is not None:
-            try:
-                cmd = f"{cmd_str}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if cmd_str not in ALLOWED_COMMANDS:
+            self.last_error = f"Refused unknown serial command: {cmd_str!r}"
+            return False
+        if self.ser is None:
+            return False
+        try:
+            cmd = f"{cmd_str}\n"
+            with self.lock:
+                if self.ser.is_open:
+                    self.ser.write(cmd.encode("utf-8"))
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
 
     def send_thresholds(self, low, high):
+        if not valid_setpoints(low, high):
+            self.last_error = (
+                f"Refused unsafe thresholds: {low}\u2013{high} \u00b0C outside "
+                f"{SAFE_TEMP_MIN}\u2013{SAFE_TEMP_MAX} \u00b0C"
+            )
+            return False
         self.target_low = low
         self.target_high = high
-        if self.ser is not None:
-            try:
-                cmd = f"SET_LOW:{low}\nSET_HIGH:{high}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if self.ser is None:
+            return False
+        try:
+            cmd = f"SET_LOW:{low}\nSET_HIGH:{high}\n"
+            with self.lock:
+                if self.ser.is_open:
+                    self.ser.write(cmd.encode("utf-8"))
+            return True
+        except Exception as e:
+            self.last_error = str(e)
+            return False
 
     # ---- read loop ---------------------------------------------------------
     def _serial_read_loop(self):
@@ -160,6 +194,54 @@ class SerialManager:
             if not self.data:
                 return None
             return self.data[-1]
+
+
+def valid_setpoints(low, high):
+    return (
+        SAFE_TEMP_MIN <= low <= SAFE_TEMP_MAX
+        and SAFE_TEMP_MIN <= high <= SAFE_TEMP_MAX
+        and high - low >= MIN_TEMP_SPAN
+    )
+
+
+def configured_password():
+    env_password = os.environ.get("COOPGUARD_DASHBOARD_PASSWORD", "")
+    if env_password:
+        return env_password
+    try:
+        return st.secrets.get("dashboard_password", "")
+    except Exception:
+        return ""
+
+
+def require_authentication():
+    """Gate the dashboard behind a shared password when one is configured.
+
+    The dashboard can switch heating and cooling hardware on and off, so it must
+    not be reachable by anyone who can open its port.
+    """
+    expected = configured_password()
+    if not expected:
+        st.sidebar.warning(
+            "No dashboard password set. Export COOPGUARD_DASHBOARD_PASSWORD and "
+            "bind Streamlit to localhost before exposing this dashboard."
+        )
+        return
+    if st.session_state.get("coopguard_authenticated"):
+        return
+
+    st.title("Poultry House Monitor Sign In")
+    entered = st.text_input("Dashboard password", type="password")
+    if st.button("Sign in"):
+        if hmac.compare_digest(entered, expected):
+            st.session_state["coopguard_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+require_authentication()
 
 
 @st.cache_resource
