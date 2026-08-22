@@ -96,10 +96,15 @@ void loop() {
     float humidity = dht.readHumidity();
     int lightLevel = analogRead(ldrPin);
 
-    // Guard against invalid sensor readings
+    // Guard against invalid sensor readings: report the fault, hold the
+    // last actuator state, and skip this cycle instead of acting on bad data
     if (isnan(temperature) || isnan(humidity)) {
-      temperature = 0.0;
-      humidity = 0.0;
+      Serial.println("ERROR:DHT22 read failed");
+      lcd.setCursor(0, 0);
+      lcd.print("Sensor Error!   ");
+      lcd.setCursor(0, 1);
+      lcd.print("Check DHT22     ");
+      return;
     }
 
     int fanStatus = 0;
@@ -113,40 +118,38 @@ void loop() {
     }
 
     // 4. Actuator & LED Logic
-    if (temperature > 0.0) {
-      if (temperature > tempHighLimit) {
-        // 🔴 OVERHEATING -> Fan ON, Red LED ON, Green & Yellow OFF
-        digitalWrite(fanPin, HIGH);
-        fanStatus = 1;
+    if (temperature > tempHighLimit) {
+      // 🔴 OVERHEATING -> Fan ON, Red LED ON, Green & Yellow OFF
+      digitalWrite(fanPin, HIGH);
+      fanStatus = 1;
 
-        digitalWrite(redLedPin, HIGH);
-        digitalWrite(yellowLedPin, LOW);
-        digitalWrite(greenLedPin, LOW);
+      digitalWrite(redLedPin, HIGH);
+      digitalWrite(yellowLedPin, LOW);
+      digitalWrite(greenLedPin, LOW);
 
-        triggerBuzzerChirp(150);
+      triggerBuzzerChirp(150);
 
-      } else if (temperature < tempLowLimit) {
-        // 🟡 TOO COLD -> Fan OFF, Yellow LED ON, Green & Red OFF
-        digitalWrite(fanPin, LOW);
-        fanStatus = 0;
+    } else if (temperature < tempLowLimit) {
+      // 🟡 TOO COLD -> Fan OFF, Yellow LED ON, Green & Red OFF
+      digitalWrite(fanPin, LOW);
+      fanStatus = 0;
 
-        digitalWrite(redLedPin, LOW);
-        digitalWrite(yellowLedPin, HIGH);
-        digitalWrite(greenLedPin, LOW);
+      digitalWrite(redLedPin, LOW);
+      digitalWrite(yellowLedPin, HIGH);
+      digitalWrite(greenLedPin, LOW);
 
-        triggerBuzzerDoubleChirp();
+      triggerBuzzerDoubleChirp();
 
-      } else {
-        // 🟢 RANGE REACHED -> Fan OFF, Yellow & Red OFF, Green LED ON
-        digitalWrite(fanPin, LOW);
-        fanStatus = 0;
+    } else {
+      // 🟢 RANGE REACHED -> Fan OFF, Yellow & Red OFF, Green LED ON
+      digitalWrite(fanPin, LOW);
+      fanStatus = 0;
 
-        digitalWrite(redLedPin, LOW);
-        digitalWrite(yellowLedPin, LOW);
-        digitalWrite(greenLedPin, HIGH);
+      digitalWrite(redLedPin, LOW);
+      digitalWrite(yellowLedPin, LOW);
+      digitalWrite(greenLedPin, HIGH);
 
-        digitalWrite(buzzerPin, LOW);
-      }
+      digitalWrite(buzzerPin, LOW);
     }
 
     // 5. Apply Heating Bulb Relay State

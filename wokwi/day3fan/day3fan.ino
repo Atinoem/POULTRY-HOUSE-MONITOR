@@ -47,10 +47,12 @@ void loop() {
   float humidity = dht.readHumidity();
   int lightLevel = analogRead(ldrPin); // Reads 0 (dark) to 1023 (bright)
 
-  // Check if DHT22 read failed
+  // Check if DHT22 read failed: report the fault, hold the last fan state,
+  // and skip this cycle instead of acting on bad data
   if (isnan(temperature) || isnan(humidity)) {
-    temperature = 0.0;
-    humidity = 0.0;
+    Serial.println("ERROR:DHT22 read failed");
+    delay(2000);
+    return;
   }
 
   // 3. Control Logic for the single MOSFET module based on dynamic threshold

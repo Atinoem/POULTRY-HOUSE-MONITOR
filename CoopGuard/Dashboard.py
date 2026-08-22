@@ -15,7 +15,6 @@ Run with:
 ===============================================================
 """
 
-import time
 import threading
 from collections import deque
 from datetime import datetime, timedelta
@@ -60,6 +59,9 @@ class SerialManager:
         self.running = False
         self.connected_port = None
         self.last_error = None
+        self.last_device_error = None
+        self.connection_lost = False
+        self.parse_error_count = 0
         self.target_low = 29.0   # Default Week 2 Low
         self.target_high = 32.0  # Default Week 2 High
         self.current_week_cmd = "WEEK2"
@@ -73,6 +75,9 @@ class SerialManager:
             self.connected_port = port
             self.running = True
             self.last_error = None
+            self.last_device_error = None
+            self.connection_lost = False
+            self.parse_error_count = 0
             self.thread = threading.Thread(target=self._serial_read_loop, daemon=True)
             self.thread.start()
             
@@ -94,53 +99,75 @@ class SerialManager:
             try:
                 if self.ser.is_open:
                     self.ser.close()
-            except Exception:
-                pass
+            except Exception as e:
+                if self.last_error is None:
+                    self.last_error = f"Error closing serial port: {e}"
         self.ser = None
         self.thread = None
         self.connected_port = None
 
     # ---- Commands & Thresholds (Thread-Safe) --------------------------------
     def send_command(self, cmd_str):
-        if self.ser is not None:
-            try:
-                cmd = f"{cmd_str}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if self.ser is None:
+            self.last_error = "Cannot send command: not connected."
+            return False
+        try:
+            cmd = f"{cmd_str}\n"
+            with self.lock:
+                if not self.ser.is_open:
+                    self.last_error = "Cannot send command: serial port is closed."
+                    return False
+                self.ser.write(cmd.encode("utf-8"))
+            return True
+        except (serial.SerialException, OSError) as e:
+            self.last_error = f"Failed to send command '{cmd_str}': {e}"
+            return False
 
     def send_thresholds(self, low, high):
         self.target_low = low
         self.target_high = high
-        if self.ser is not None:
-            try:
-                cmd = f"SET_LOW:{low:.1f}\nSET_HIGH:{high:.1f}\n"
-                with self.lock:
-                    if self.ser.is_open:
-                        self.ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                self.last_error = str(e)
+        if self.ser is None:
+            self.last_error = "Cannot send thresholds: not connected."
+            return False
+        try:
+            cmd = f"SET_LOW:{low:.1f}\nSET_HIGH:{high:.1f}\n"
+            with self.lock:
+                if not self.ser.is_open:
+                    self.last_error = "Cannot send thresholds: serial port is closed."
+                    return False
+                self.ser.write(cmd.encode("utf-8"))
+            return True
+        except (serial.SerialException, OSError) as e:
+            self.last_error = f"Failed to send thresholds: {e}"
+            return False
 
     # ---- Read Loop ---------------------------------------------------------
     def _serial_read_loop(self):
         while self.running and self.ser is not None:
             try:
                 if not self.ser.is_open:
+                    self.last_error = "Serial port closed unexpectedly."
+                    self.connection_lost = True
                     break
                 raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
                 if not raw:
                     continue
+                if raw.startswith("ERROR"):
+                    self.last_device_error = raw
+                    continue
                 parts = raw.split(",")
                 if len(parts) != 4:
                     continue
-                
-                temp = float(parts[0])
-                hum = float(parts[1])
-                light = int(parts[2])
-                fan = int(parts[3])
-                
+
+                try:
+                    temp = float(parts[0])
+                    hum = float(parts[1])
+                    light = int(parts[2])
+                    fan = int(parts[3])
+                except ValueError:
+                    self.parse_error_count += 1
+                    continue
+
                 with self.lock:
                     self.data.append({
                         "timestamp": datetime.now(),
@@ -149,9 +176,16 @@ class SerialManager:
                         "light_level": light,
                         "fan_status": fan,
                     })
-            except Exception as e:
-                self.last_error = str(e)
-                time.sleep(0.5)
+            except (serial.SerialException, OSError) as e:
+                self.last_error = f"Serial connection lost: {e}"
+                self.connection_lost = True
+                self.running = False
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.connected_port = None
+                break
 
     # ---- Data Access --------------------------------------------------------
     def get_dataframe(self):
@@ -189,8 +223,10 @@ else:
             break
 
 # Auto-connect on startup
-if detected_port and not manager.connected_port and not manager.last_error:
-    manager.connect_serial(detected_port, 9600)
+auto_connect_failed = False
+if (detected_port and not manager.connected_port and not manager.last_error
+        and not manager.connect_serial(detected_port, 9600)):
+    auto_connect_failed = True
 
 # ---------------------------------------------------------------
 # Sidebar - Branding, Setup & Connection Controls
@@ -237,12 +273,17 @@ if manager.target_high != target_high or manager.target_low != target_low or man
     manager.target_high = target_high
     manager.current_week_cmd = week_cmd
     if week_cmd:
-        manager.send_command(week_cmd)
+        sent_ok = manager.send_command(week_cmd)
     else:
-        manager.send_thresholds(target_low, target_high)
+        sent_ok = manager.send_thresholds(target_low, target_high)
+    if manager.connected_port and not sent_ok:
+        st.sidebar.error(f"Failed to sync thresholds to hardware: {manager.last_error}")
 
 st.sidebar.divider()
 st.sidebar.subheader("Hardware Connection")
+
+if auto_connect_failed:
+    st.sidebar.warning(f"Auto-connect to {detected_port} failed: {manager.last_error}")
 
 available_ports = [p.device for p in ports_found]
 port_options = available_ports + ["Custom / manual entry..."]
@@ -281,6 +322,8 @@ if manager.connected_port:
     st.sidebar.success(f"Active on {manager.connected_port} @ {baud_rate} baud")
 else:
     st.sidebar.caption("Disconnected")
+    if manager.last_error:
+        st.sidebar.error(f"Last error: {manager.last_error}")
 
 # ---------------------------------------------------------------
 # Main Dashboard Header
@@ -310,6 +353,11 @@ def card_html(label, value_str, status):
 def live_dashboard():
     df = manager.get_dataframe()
     latest = manager.get_latest()
+
+    if manager.connection_lost:
+        st.error(f"⚠️ **HARDWARE CONNECTION LOST:** {manager.last_error} Reconnect from the sidebar.")
+    if manager.last_device_error:
+        st.warning(f"⚠️ **HARDWARE FAULT REPORTED:** `{manager.last_device_error}` — check the DHT22 sensor wiring.")
 
     # ---- Metric Cards ----
     c1, c2, c3, c4, c5 = st.columns(5)
